@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omicmap"
+version = "0.1.0"
+description = "Missing-aware prompt-guided multi-omics phenotype prediction."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "PyYAML",
+  "torch",
+  "mamba-ssm",
+]
+
+[tool.setuptools.packages.find]
+include = ["omicmap*"]
