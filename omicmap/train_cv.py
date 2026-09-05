@@ -11,13 +11,14 @@ from typing import Any, Dict, List, Sequence
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 
-from .data_utils import TRAIT_COLUMNS, load_and_align_data
+from .artifacts import ExperimentLayout, save_checkpoint
+from .data_utils import TRAIT_COLUMNS, load_aligned_from_config
+from .dataset import make_training_loader as make_loader
 from .metrics import regression_metrics_per_trait
-from .model import MultiOmicsMultiTaskRegressor
+from .model_registry import build_model, omicmap_init_kwargs
 from .preprocess import FoldPreprocessor
+from .training import evaluate_model, fit_model
 
 try:
     import yaml
@@ -152,7 +153,10 @@ def with_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     defaults = {
         "seed": 42,
         "data_dir": "data",
-        "output_dir": "outputs",
+        "run_name": None,
+        "model_name": "omicmap",
+        "model_dir": "models",
+        "result_dir": "results",
         "traits": TRAIT_COLUMNS,
         "validation_split": 0.1,
         "training": {
@@ -204,7 +208,7 @@ def with_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "ratio_by_modality": {},
             "drop_missing_samples": False,
             "pattern_probs": {"geno": 1.0, "expr": 1.0, "metab": 1.0},
-            "table_root": "outputs/missing_tables",
+            "table_root": "missing_tables",
             "simulate_missing": False,
             "simulate_pool": [0, 1, 2, 4],
             "fill_strategy": "zero",
@@ -221,7 +225,10 @@ def with_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "log_prompt_gate": True,
         },
     }
-    return _deep_merge(defaults, cfg)
+    merged = _deep_merge(defaults, cfg)
+    if "result_dir" not in cfg and "output_dir" in cfg:
+        merged["result_dir"] = cfg["output_dir"]
+    return merged
 
 
 def choose_device(cfg_device: str) -> torch.device:
@@ -405,150 +412,9 @@ def _apply_missing(
     return og.astype(np.float32), oe.astype(np.float32), om.astype(np.float32), present
 
 
-def make_loader(
-    geno: np.ndarray,
-    expr: np.ndarray,
-    metab: np.ndarray,
-    present: np.ndarray,
-    missing_codes: np.ndarray,
-    y: np.ndarray,
-    batch_size: int,
-    shuffle: bool,
-    num_workers: int,
-) -> DataLoader:
-    ds = TensorDataset(
-        torch.tensor(geno, dtype=torch.float32).unsqueeze(1),
-        torch.tensor(expr, dtype=torch.float32),
-        torch.tensor(metab, dtype=torch.float32),
-        torch.tensor(present, dtype=torch.float32),
-        torch.tensor(missing_codes, dtype=torch.long),
-        torch.tensor(y, dtype=torch.float32),
-    )
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
-
-
 def _safe_to_csv(df: pd.DataFrame, path: Path, *, index: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=index)
-
-
-def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device, out_dim: int) -> tuple[np.ndarray, np.ndarray, float]:
-    model.eval()
-    preds, trues, losses = [], [], []
-    loss_fn = nn.L1Loss()
-    with torch.no_grad():
-        for geno, expr, metab, present, missing_code, y in loader:
-            out = model(
-                geno.to(device),
-                expr.to(device),
-                metab.to(device),
-                missing_code=missing_code.to(device),
-            )
-            loss = loss_fn(out, y.to(device))
-            losses.append(float(loss.item()))
-            preds.append(out.cpu().numpy())
-            trues.append(y.cpu().numpy())
-    p = np.concatenate(preds, axis=0) if preds else np.empty((0, int(out_dim)), dtype=np.float32)
-    t = np.concatenate(trues, axis=0) if trues else np.empty((0, int(out_dim)), dtype=np.float32)
-    return p, t, float(np.mean(losses) if losses else 0.0)
-
-
-def _get_prompt_gate_vector(
-    model: nn.Module,
-    missing_code: int | None = None,
-    *,
-    effective: bool = False,
-) -> np.ndarray | None:
-    getter_name = "get_effective_prompt_gate" if effective else "get_prompt_gate"
-    getter = getattr(model, getter_name, None)
-    if getter is None or not callable(getter):
-        return None
-    try:
-        if effective and missing_code is None:
-            return None
-        if missing_code is None:
-            gate = getter()
-        else:
-            device = next(model.parameters()).device
-            code = torch.tensor([int(missing_code)], dtype=torch.long, device=device)
-            gate = getter(code)
-        if isinstance(gate, torch.Tensor):
-            arr = gate.detach().cpu().reshape(-1).numpy().astype(np.float64)
-        else:
-            arr = np.asarray([float(gate)], dtype=np.float64)
-        if arr.size == 0:
-            return None
-        if arr.size == 1:
-            return np.repeat(arr, 3)
-        if arr.size < 3:
-            return np.pad(arr, (0, 3 - arr.size), mode="edge")
-        return arr[:3]
-    except Exception:
-        return None
-
-
-def _gate_stats_row(model: nn.Module) -> dict[str, float | None]:
-    stats: dict[str, float | None] = {}
-
-    def _fill(prefix: str, vec: np.ndarray | None) -> None:
-        if vec is None:
-            stats[prefix] = None
-            stats[f"{prefix}_g"] = None
-            stats[f"{prefix}_e"] = None
-            stats[f"{prefix}_m"] = None
-            return
-        stats[prefix] = float(np.mean(vec))
-        stats[f"{prefix}_g"] = float(vec[0])
-        stats[f"{prefix}_e"] = float(vec[1])
-        stats[f"{prefix}_m"] = float(vec[2])
-
-    gate_now = _get_prompt_gate_vector(model, missing_code=None, effective=False)
-    gate_code0 = _get_prompt_gate_vector(model, missing_code=0, effective=False)
-    gate_code7 = _get_prompt_gate_vector(model, missing_code=7, effective=False)
-    eff_code0 = _get_prompt_gate_vector(model, missing_code=0, effective=True)
-    eff_code7 = _get_prompt_gate_vector(model, missing_code=7, effective=True)
-
-    _fill("prompt_gate", gate_now)
-    _fill("prompt_gate_code0", gate_code0)
-    _fill("prompt_gate_code7", gate_code7)
-    _fill("effective_prompt_gate_code0", eff_code0)
-    _fill("effective_prompt_gate_code7", eff_code7)
-    return stats
-
-
-def _set_branch_trainable(model: nn.Module, trainable: bool) -> None:
-    branch_names = ("genotype_branch", "expression_branch", "metabolites_branch")
-    for name in branch_names:
-        module = getattr(model, name, None)
-        if module is None:
-            continue
-        for p in module.parameters():
-            p.requires_grad = bool(trainable)
-
-
-def _build_optimizer(model: nn.Module, tr_cfg: Dict[str, Any]) -> torch.optim.Optimizer:
-    base_lr = float(tr_cfg["lr"])
-    weight_decay = float(tr_cfg["weight_decay"])
-    prompt_lr_mult = float(tr_cfg.get("prompt_lr_mult", 1.0))
-    prompt_lr_mult = max(prompt_lr_mult, 0.0)
-    prompt_keys = ("prompt_learner", "prompted_fusion", "prompt_gate")
-
-    base_params: list[torch.nn.Parameter] = []
-    prompt_params: list[torch.nn.Parameter] = []
-
-    for name, p in model.named_parameters():
-        if any(k in name for k in prompt_keys):
-            prompt_params.append(p)
-        else:
-            base_params.append(p)
-
-    param_groups: list[dict[str, Any]] = []
-    if base_params:
-        param_groups.append({"params": base_params, "lr": base_lr})
-    if prompt_params:
-        param_groups.append({"params": prompt_params, "lr": base_lr * prompt_lr_mult})
-
-    return torch.optim.Adam(param_groups, weight_decay=weight_decay)
 
 
 def run_one_fold(
@@ -559,7 +425,7 @@ def run_one_fold(
     test_ids: list[str],
     device: torch.device,
     traits: list[str],
-    output_dir: Path,
+    layout: ExperimentLayout,
 ) -> Dict[str, Any]:
     if len(traits) != 1:
         raise ValueError(f"Single-regression mode requires exactly one trait, got {traits}")
@@ -625,118 +491,51 @@ def run_one_fold(
     valid_loader = make_loader(x_valid_g, x_valid_e, x_valid_m, valid_present, valid_codes, y_valid, int(tr_cfg["batch_size"]), False, int(tr_cfg["num_workers"]))
     test_loader = make_loader(x_test_g, x_test_e, x_test_m, test_present, test_codes, y_test, int(tr_cfg["batch_size"]), False, int(tr_cfg["num_workers"]))
 
-    model = MultiOmicsMultiTaskRegressor(
+    trait_tag = traits[0]
+    model_name = str(cfg.get("model_name", "omicmap")).strip().lower()
+    model_init = omicmap_init_kwargs(
+        model_cfg,
         num_genotype_features=x_train_g.shape[1],
         num_expression_features=x_train_e.shape[1],
         num_metabolites_features=x_train_m.shape[1],
         num_tasks=1,
-        branch_emb_dim=int(model_cfg["branch_emb_dim"]),
-        fusion_hidden_dims=list(model_cfg["fusion_hidden_dims"]),
-        dropout=float(model_cfg["dropout"]),
-        use_batchnorm=bool(model_cfg["use_batchnorm"]),
-        fusion_num_heads=int(model_cfg["fusion_num_heads"]),
-        fusion_layers=int(model_cfg["fusion_layers"]),
-        prompt_enable=bool(model_cfg["prompt_enable"]),
-        prompt_length=int(model_cfg["prompt_length"]),
-        prompt_depth=int(model_cfg["prompt_depth"]),
-        num_missing_types=int(model_cfg["num_missing_types"]),
-        prompt_gate_init=model_cfg.get("prompt_gate_init", 0.0),
-        prompt_gate_learnable=bool(model_cfg.get("prompt_gate_learnable", True)),
-        prompt_gate_per_modality=bool(model_cfg.get("prompt_gate_per_modality", True)),
-        prompt_gate_use_missing_delta=bool(model_cfg.get("prompt_gate_use_missing_delta", True)),
-        prompt_gate_missing_delta_scale=float(model_cfg.get("prompt_gate_missing_delta_scale", 0.2)),
-        prompt_gate_missing_delta_init_no_missing=model_cfg.get("prompt_gate_missing_delta_init_no_missing", -0.04),
-        prompt_gate_missing_delta_init_missing=model_cfg.get("prompt_gate_missing_delta_init_missing", 0.12),
-        prompt_disable_on_complete=bool(model_cfg.get("prompt_disable_on_complete", True)),
-        prompt_complete_update_scale=float(model_cfg.get("prompt_complete_update_scale", 0.0)),
-        mamba_layers=int(model_cfg.get("mamba_layers", 2)),
-        mamba_d_state=int(model_cfg.get("mamba_d_state", 16)),
-        mamba_d_conv=int(model_cfg.get("mamba_d_conv", 4)),
-        mamba_expand=int(model_cfg.get("mamba_expand", 2)),
-    ).to(device)
-
-    optimizer = _build_optimizer(model, tr_cfg)
-    loss_fn = nn.L1Loss()
-    use_aux_losses = bool(tr_cfg.get("use_aux_losses", True))
-    aux_cfg = tr_cfg.get("aux_loss_weights", {})
-    aux_w_g = float(aux_cfg.get("a", 1.0)) if use_aux_losses else 0.0
-    aux_w_e = float(aux_cfg.get("b", 1.0)) if use_aux_losses else 0.0
-    aux_w_m = float(aux_cfg.get("c", 1.0)) if use_aux_losses else 0.0
-    best_val, best_state, wait = float("inf"), None, 0
-    epochs, patience, min_delta = int(tr_cfg["epochs"]), int(tr_cfg["patience"]), float(tr_cfg["min_delta"])
-    warmup_epochs = int(tr_cfg.get("prompt_warmup_freeze_branch_epochs", 0))
-    prompt_enabled = bool(model_cfg.get("prompt_enable", False))
-    gate_log_rows: list[dict[str, Any]] = []
-    trait_tag = traits[0]
-
-    for epoch_idx in range(1, epochs + 1):
-        if prompt_enabled and warmup_epochs > 0:
-            _set_branch_trainable(model, trainable=(epoch_idx > warmup_epochs))
-        else:
-            _set_branch_trainable(model, trainable=True)
-
-        model.train()
-        for geno, expr, metab, present, missing_code, yb in train_loader:
-            optimizer.zero_grad()
-            if use_aux_losses:
-                out_main, out_geno, out_expr, out_metab = model(
-                    geno.to(device),
-                    expr.to(device),
-                    metab.to(device),
-                    missing_code=missing_code.to(device),
-                    return_aux=True,
-                )
-            else:
-                out_main = model(
-                    geno.to(device),
-                    expr.to(device),
-                    metab.to(device),
-                    missing_code=missing_code.to(device),
-                    return_aux=False,
-                )
-            target = yb.to(device)
-            main_loss = loss_fn(out_main, target)
-            if use_aux_losses:
-                geno_loss = loss_fn(out_geno, target)
-                expr_loss = loss_fn(out_expr, target)
-                metab_loss = loss_fn(out_metab, target)
-                total_loss = main_loss + aux_w_g * geno_loss + aux_w_e * expr_loss + aux_w_m * metab_loss
-            else:
-                total_loss = main_loss
-            total_loss.backward()
-            optimizer.step()
-
-        _, _, val_loss = evaluate_model(model, valid_loader, device, out_dim=1)
-        is_best = val_loss < (best_val - min_delta)
-        gate_log_rows.append(
-            {
-                "fold": int(fold),
-                "trait": trait_tag,
-                "epoch": int(epoch_idx),
-                "prompt_enabled": int(prompt_enabled),
-                "branch_trainable": int((not prompt_enabled) or (warmup_epochs <= 0) or (epoch_idx > warmup_epochs)),
-                "val_loss": float(val_loss),
-                "is_best": int(is_best),
-            }
-        )
-        gate_log_rows[-1].update(_gate_stats_row(model))
-        if is_best:
-            best_val = val_loss
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            wait = 0
-        else:
-            wait += 1
-        if wait >= patience:
-            break
+    )
+    model = build_model(model_name, model_init, device=device)
+    fit_result = fit_model(
+        model,
+        train_loader,
+        valid_loader,
+        device,
+        tr_cfg,
+        model_cfg,
+        history_context={"fold": int(fold), "trait": trait_tag},
+    )
 
     if bool(cfg.get("logging", {}).get("log_prompt_gate", True)):
-        gate_log_dir = output_dir / "prompt_gate_logs"
+        gate_log_dir = layout.log_dir / "prompt_gate"
         gate_log_dir.mkdir(parents=True, exist_ok=True)
         gate_log_path = gate_log_dir / f"{trait_tag}_fold_{fold}.csv"
-        _safe_to_csv(pd.DataFrame(gate_log_rows), gate_log_path, index=False)
+        _safe_to_csv(pd.DataFrame(fit_result.history), gate_log_path, index=False)
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    model.load_state_dict(fit_result.best_state_dict)
+    checkpoint_path = save_checkpoint(
+        layout.checkpoint_path(trait_tag, fold, model_name),
+        model=model,
+        model_name=model_name,
+        model_init=model_init,
+        trait=trait_tag,
+        preprocessor=pre,
+        target_mean=y_std.mean,
+        target_std=y_std.std,
+        fill_vectors=(fill_g, fill_e, fill_m),
+        split_ids={"train": train_inner_ids, "valid": valid_ids, "test": test_ids},
+        metadata={
+            "fold": int(fold),
+            "run_name": layout.run_name,
+            "best_val_loss": float(fit_result.best_val_loss),
+            "epochs_ran": int(fit_result.epochs_ran),
+        },
+    )
 
     pred_std, true_std, _ = evaluate_model(model, test_loader, device, out_dim=1)
     pred_test, true_test = y_std.inverse_transform(pred_std), y_std.inverse_transform(true_std)
@@ -744,28 +543,27 @@ def run_one_fold(
     for row in fold_metrics:
         row["fold"] = fold
 
-    extra_df = pd.DataFrame(
+    fold_pred_df = pd.DataFrame(
         {
+            "ID": test_ids,
+            model_name: pred_test[:, 0],
+            "true": true_test[:, 0],
+            "fold": int(fold),
+            "trait": trait_tag,
             "missing_code": test_codes.astype(np.int64),
             "present_geno": test_present[:, 0].astype(np.float32),
             "present_expr": test_present[:, 1].astype(np.float32),
             "present_metab": test_present[:, 2].astype(np.float32),
         }
     )
-    fold_pred_df = pd.concat(
-        [
-            pd.DataFrame({"sample_id": test_ids, "fold": fold}),
-            extra_df,
-            pd.DataFrame(true_test, columns=[f"true_{t}" for t in traits]),
-            pd.DataFrame(pred_test, columns=[f"pred_{t}" for t in traits]),
-        ],
-        axis=1,
-    )
     return {
         "fold": fold,
         "metrics": fold_metrics,
         "test_predictions": fold_pred_df,
-        "best_val_loss": best_val,
+        "best_val_loss": fit_result.best_val_loss,
+        "checkpoint": str(checkpoint_path),
+        "epochs_ran": fit_result.epochs_ran,
+        "model_name": model_name,
         "drop_stats": drop_stats,
     }
 
@@ -773,21 +571,26 @@ def run_one_fold(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fixed 10-fold CV training for OmicMAP")
     parser.add_argument("--config", type=str, required=True, help="Path to yaml config")
-    parser.add_argument("--trait_name", type=str, default=None, help="Run single trait (yd/tp/gn/kgw).")
+    parser.add_argument("--trait_name", type=str, default=None, help="Run one phenotype column from the selected dataset.")
+    parser.add_argument("--folds", type=str, default=None, help="Optional comma-separated fold ids, e.g. 1,2,3")
+    parser.add_argument("--run_name", type=str, default=None, help="Override config.run_name")
     args = parser.parse_args()
 
     cfg = with_defaults(load_config(args.config))
+    if args.run_name is not None:
+        cfg["run_name"] = str(args.run_name).strip()
+    layout = ExperimentLayout.from_config(cfg, args.config)
+    layout.ensure_roots()
+    cfg["run_name"] = layout.run_name
+    cfg["model_name"] = str(cfg.get("model_name", "omicmap")).strip().lower()
+    cfg["model_dir"] = str(layout.model_root.parent)
+    cfg["result_dir"] = str(layout.result_root.parent)
     set_seed(int(cfg["seed"]))
 
-    output_dir = Path(cfg["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    fold_pred_dir = output_dir / "fold_predictions"
-    fold_pred_dir.mkdir(parents=True, exist_ok=True)
-
     if bool(cfg.get("missing", {}).get("enable", False)):
-        table_root = Path(str(cfg["missing"].get("table_root", "outputs/missing_tables")))
+        table_root = Path(str(cfg["missing"].get("table_root", "missing_tables")))
         if not table_root.is_absolute():
-            table_root = output_dir / table_root
+            table_root = layout.result_root / table_root
         table_root.mkdir(parents=True, exist_ok=True)
         cfg["missing"]["table_root"] = str(table_root)
 
@@ -795,42 +598,57 @@ def main() -> None:
     all_traits = list(cfg["traits"])
     trait_name = str(args.trait_name).strip() if args.trait_name is not None else None
     if trait_name is not None:
-        if trait_name not in TRAIT_COLUMNS:
-            raise ValueError(f"Unsupported trait_name={trait_name}, expected one of {TRAIT_COLUMNS}")
         all_traits = [trait_name]
         cfg["traits"] = all_traits
 
-    aligned = load_and_align_data(data_dir=cfg["data_dir"], traits=all_traits)
+    aligned = load_aligned_from_config(cfg, traits=all_traits)
     all_folds = sorted(pd.Series(aligned.fold_map.values).astype(int).unique().tolist())
-    single_trait_mode = True
+    if args.folds is not None:
+        requested_folds = [int(x.strip()) for x in args.folds.split(",") if x.strip()]
+        invalid_folds = sorted(set(requested_folds) - set(all_folds))
+        if invalid_folds:
+            raise ValueError(f"Unknown folds {invalid_folds}; available folds: {all_folds}")
+        all_folds = requested_folds
     fold_rows: List[Dict[str, Any]] = []
     fold_drop_rows: List[Dict[str, Any]] = []
+    checkpoint_rows: List[Dict[str, Any]] = []
 
     oof_by_trait: Dict[str, List[pd.DataFrame]] = {t: [] for t in all_traits}
     for trait in all_traits:
-        trait_fold_dir = fold_pred_dir / trait
-        trait_fold_dir.mkdir(parents=True, exist_ok=True)
         for fold in all_folds:
             train_ids = [sid for sid in aligned.sample_ids if int(aligned.fold_map.loc[sid]) != int(fold)]
             test_ids = [sid for sid in aligned.sample_ids if int(aligned.fold_map.loc[sid]) == int(fold)]
-            result = run_one_fold(fold, cfg, aligned, train_ids, test_ids, device, [trait], output_dir)
+            result = run_one_fold(fold, cfg, aligned, train_ids, test_ids, device, [trait], layout)
             fold_rows.extend(result["metrics"])
+            checkpoint_rows.append(
+                {
+                    "trait": trait,
+                    "fold": int(fold),
+                    "model": result["model_name"],
+                    "checkpoint": result["checkpoint"],
+                    "best_val_loss": float(result["best_val_loss"]),
+                    "epochs_ran": int(result["epochs_ran"]),
+                }
+            )
             if result.get("drop_stats"):
                 fold_drop_rows.append({"trait": trait, "fold": int(fold), **result["drop_stats"]})
             fold_pred_df = result["test_predictions"]
             oof_by_trait[trait].append(fold_pred_df)
-            _safe_to_csv(fold_pred_df, trait_fold_dir / f"fold_{fold}_test_predictions.csv", index=False)
+            _safe_to_csv(fold_pred_df, layout.fold_prediction_path(trait, fold), index=False)
 
     fold_metrics_df = pd.DataFrame(fold_rows)
-    fold_metrics_path = output_dir / "fold_metrics.csv"
+    fold_metrics_path = layout.summary_dir / "fold_metrics.csv"
     _safe_to_csv(fold_metrics_df, fold_metrics_path, index=False)
+    _safe_to_csv(pd.DataFrame(checkpoint_rows), layout.summary_dir / "checkpoints.csv", index=False)
 
     summary: Dict[str, Any] = {
         "config": cfg,
         "num_folds": int(len(all_folds)),
         "traits": all_traits,
         "folds": all_folds,
-        "single_trait_mode": single_trait_mode,
+        "model_name": str(cfg.get("model_name", "omicmap")),
+        "model_root": str(layout.model_root),
+        "result_root": str(layout.result_root),
         "metrics_mean_by_trait": {},
         "metrics_se_by_trait": {},
         "overall_oof_metrics_by_trait": {},
@@ -856,11 +674,11 @@ def main() -> None:
         }
 
     for trait in all_traits:
-        trait_oof_df = pd.concat(oof_by_trait[trait], axis=0, ignore_index=True).sort_values("sample_id").reset_index(drop=True)
-        trait_oof_path = output_dir / f"oof_predictions_{trait}.csv"
+        trait_oof_df = pd.concat(oof_by_trait[trait], axis=0, ignore_index=True).sort_values("ID").reset_index(drop=True)
+        trait_oof_path = layout.summary_dir / f"oof_predictions_{trait}.csv"
         _safe_to_csv(trait_oof_df, trait_oof_path, index=False)
-        y_true = trait_oof_df[[f"true_{trait}"]].to_numpy(dtype=np.float32)
-        y_pred = trait_oof_df[[f"pred_{trait}"]].to_numpy(dtype=np.float32)
+        y_true = trait_oof_df[["true"]].to_numpy(dtype=np.float32)
+        y_pred = trait_oof_df[[str(cfg.get("model_name", "omicmap"))]].to_numpy(dtype=np.float32)
         row = regression_metrics_per_trait(y_true, y_pred, [trait])[0]
         summary["overall_oof_metrics_by_trait"][trait] = {
                 "pearson": float(row["pearson"]),
@@ -869,11 +687,16 @@ def main() -> None:
                 "r2": float(row["r2"]),
             }
 
-    summary_path = output_dir / "summary.json"
+    summary_path = layout.summary_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    (layout.summary_dir / "config_resolved.json").write_text(
+        json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     print(f"[Done] fold metrics: {fold_metrics_path}")
-    print(f"[Done] oof predictions: {output_dir / 'oof_predictions_<trait>.csv'}")
+    print(f"[Done] model checkpoints: {layout.model_root}")
+    print(f"[Done] fold predictions: {layout.result_root / 'k<fold>/<trait>.csv'}")
     print(f"[Done] summary: {summary_path}")
 
 

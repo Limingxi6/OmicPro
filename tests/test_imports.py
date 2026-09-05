@@ -1,4 +1,12 @@
-def test_model_import():
-    from omicmap.model import MultiOmicsMultiTaskRegressor
+import unittest
 
-    assert MultiOmicsMultiTaskRegressor is not None
+
+class ImportTests(unittest.TestCase):
+    def test_model_import(self):
+        from omicmap.model import MultiOmicsMultiTaskRegressor
+
+        self.assertIsNotNone(MultiOmicsMultiTaskRegressor)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,4 +1,4 @@
-from omicmap.train_cv import main
+from omicmap.check_data import main
 
 
 if __name__ == "__main__":

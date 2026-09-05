@@ -1,7 +1,18 @@
 seed: 42
-data_dir: data
-output_dir: outputs
+data_dir: F:/data/prompt/Rice210
+run_name: rice210_prompt_missing
+model_name: omicmap
+model_dir: models
+result_dir: results
 device: auto
+
+data:
+  genotype: Rice_geno_zhuanzhi.csv
+  expression: Rice-Expression_zhaunzhi.csv
+  metabolites: Rice_Metabolites_zhuanzhi.csv
+  phenotype: Rice-Phenotypes.csv
+  folds: CVFs.csv
+  fold_column: cv_1
 
 traits:
   - yd
@@ -18,9 +29,9 @@ training:
   lr: 0.0003
   weight_decay: 0.0001
   aux_loss_weights:
-    a: 0.10
-    b: 0.10
-    c: 0.80
+    geno: 0.10
+    expr: 0.10
+    metab: 0.80
   prompt_lr_mult: 0.8
   prompt_warmup_freeze_branch_epochs: 1
   patience: 35
@@ -72,7 +83,7 @@ missing:
     geno: 1.0
     expr: 1.0
     metab: 1.0
-  table_root: outputs/missing_tables
+  table_root: missing_tables
   simulate_missing: false
   simulate_pool: [0, 1, 2, 4]
   fill_strategy: zero

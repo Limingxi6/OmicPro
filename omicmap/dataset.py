@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from .data_utils import AlignedData, get_fixed_fold_split, load_and_align_data
 from .preprocess import FoldPreprocessor
@@ -41,6 +41,35 @@ class MultiModalDataset(Dataset):
             "metab": self.x_metab[idx],
             "y": self.y[idx],
         }
+
+
+def make_training_loader(
+    genotype: np.ndarray,
+    expression: np.ndarray,
+    metabolites: np.ndarray,
+    present_mask: np.ndarray,
+    missing_codes: np.ndarray,
+    targets: np.ndarray,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+) -> DataLoader:
+    """Build the tensor contract consumed by the shared training engine."""
+
+    dataset = TensorDataset(
+        torch.tensor(genotype, dtype=torch.float32).unsqueeze(1),
+        torch.tensor(expression, dtype=torch.float32),
+        torch.tensor(metabolites, dtype=torch.float32),
+        torch.tensor(present_mask, dtype=torch.float32),
+        torch.tensor(missing_codes, dtype=torch.long),
+        torch.tensor(targets, dtype=torch.float32),
+    )
+    return DataLoader(
+        dataset,
+        batch_size=int(batch_size),
+        shuffle=bool(shuffle),
+        num_workers=int(num_workers),
+    )
 
 
 @dataclass

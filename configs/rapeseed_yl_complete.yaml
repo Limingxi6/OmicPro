@@ -1,24 +1,23 @@
 seed: 42
-data_dir: F:/data/prompt/Rice210
-run_name: rice210_complete
+crop: rapeseed
+environment: YL
+data_dir: F:/data/prompt/rape
+run_name: rapeseed_yl_complete
 model_name: omicmap
 model_dir: models
 result_dir: results
 device: auto
 
 data:
-  genotype: Rice_geno_zhuanzhi.csv
-  expression: Rice-Expression_zhaunzhi.csv
-  metabolites: Rice_Metabolites_zhuanzhi.csv
-  phenotype: Rice-Phenotypes.csv
+  genotype: genotype/genotypes_converted_zheng1.csv
+  expression: expression/GeneExp_YL_log2.csv
+  metabolites: ASV/ASV_YL_log2.csv
+  phenotype: phenotype/ionome_YL_biao.csv
   folds: CVFs.csv
+  # CVFs.csv contains ten repeated 10-fold assignments; select one explicitly.
   fold_column: cv_1
 
-traits:
-  - yd
-  - tp
-  - gn
-  - kgw
+traits: [Al, B, Ca, Cu, Fe, K, Mg, Mn, Na, P, Zn, N, C]
 
 validation_split: 0.1
 single_trait_mode: true
@@ -65,18 +64,9 @@ model:
 
 missing:
   enable: false
-  ratio:
-    train: 0.0
-    valid: 0.0
-    test: 0.0
-  type:
-    train: none
-    valid: none
-    test: none
-  pattern_probs:
-    geno: 1.0
-    expr: 1.0
-    metab: 1.0
+  ratio: {train: 0.0, valid: 0.0, test: 0.0}
+  type: {train: none, valid: none, test: none}
+  pattern_probs: {geno: 1.0, expr: 1.0, metab: 1.0}
   table_root: missing_tables
   simulate_missing: false
   simulate_pool: [0, 1, 2, 4]
@@ -86,4 +76,4 @@ missing:
 preprocess:
   topk_genotype: null
   topk_expression: 3000
-  topk_metabolites: 600
+  topk_metabolites: null

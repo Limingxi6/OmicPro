@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -23,13 +23,26 @@ class AlignedData:
     fold_map: pd.Series  # index=sample_id, value=fold_id(int)
 
 
+@dataclass
+class AlignedModalities:
+    """Three omics matrices aligned for phenotype-free prediction."""
+
+    sample_ids: List[str]
+    genotype: pd.DataFrame
+    expression: pd.DataFrame
+    metabolites: pd.DataFrame
+
+
 def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        raise FileNotFoundError(f"Required data file does not exist: {path}")
+    errors: list[str] = []
     for enc in ("utf-8", "utf-8-sig", "gbk", "latin1"):
         try:
             return pd.read_csv(path, encoding=enc, low_memory=False)
-        except Exception:
-            continue
-    raise RuntimeError(f"无法读取文件: {path}")
+        except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+            errors.append(f"{enc}: {exc}")
+    raise RuntimeError(f"Unable to parse CSV file {path}. Attempts: {' | '.join(errors)}")
 
 
 def _detect_id_column(df: pd.DataFrame) -> str:
@@ -43,23 +56,56 @@ def _detect_id_column(df: pd.DataFrame) -> str:
 def _prepare_modality_df(df: pd.DataFrame, id_col: str) -> pd.DataFrame:
     out = df.copy()
     out[id_col] = out[id_col].astype(str).str.strip()
-    out = out.drop_duplicates(subset=[id_col], keep="first")
+    if (out[id_col] == "").any():
+        raise ValueError(f"Column '{id_col}' contains empty sample IDs.")
+    duplicated = out.loc[out[id_col].duplicated(keep=False), id_col].unique().tolist()
+    if duplicated:
+        raise ValueError(
+            f"Column '{id_col}' contains duplicate sample IDs; examples: {duplicated[:5]}"
+        )
     out = out.set_index(id_col)
     return out
 
 
-def _extract_fold_map(cvf_df: pd.DataFrame, sample_id_col: str) -> pd.Series:
+def _extract_fold_map(
+    cvf_df: pd.DataFrame,
+    sample_id_col: str,
+    fold_column: Optional[str] = None,
+) -> pd.Series:
     """
     解析 CVFs.csv 支持两类格式：
     1) sample_id + fold_id（如 ID, cv_1）
     2) sample_id + fold1...fold10（取值为0/1或one-hot风格）
+
+    对于多列重复交叉验证（例如 cv_1...cv_10 每列都包含 1...10），
+    必须通过 ``fold_column`` 明确选择一列，避免静默误读。
     """
     work = cvf_df.copy()
     work[sample_id_col] = work[sample_id_col].astype(str).str.strip()
+    duplicated = work.loc[work[sample_id_col].duplicated(keep=False), sample_id_col].unique().tolist()
+    if duplicated:
+        raise ValueError(f"CV file contains duplicate sample IDs; examples: {duplicated[:5]}")
 
     non_id_cols = [c for c in work.columns if c != sample_id_col]
     if not non_id_cols:
         raise ValueError("CVFs.csv 不包含 fold 列。")
+
+    if fold_column is not None:
+        fold_col = str(fold_column)
+        if fold_col not in non_id_cols:
+            raise ValueError(
+                f"CVFs 不包含指定的 fold_column={fold_col!r}；"
+                f"可选列为: {list(map(str, non_id_cols))}"
+            )
+        fold_map = pd.to_numeric(work[fold_col], errors="coerce")
+        if fold_map.isna().any():
+            raise ValueError(f"CVFs 列 `{fold_col}` 含非数值 fold 值。")
+        out = pd.Series(
+            fold_map.astype(int).values,
+            index=work[sample_id_col].values,
+            name="fold_id",
+        )
+        return out
 
     # 格式1：只有一个非ID列，直接作为fold_id
     if len(non_id_cols) == 1:
@@ -70,7 +116,7 @@ def _extract_fold_map(cvf_df: pd.DataFrame, sample_id_col: str) -> pd.Series:
         out = pd.Series(fold_map.astype(int).values, index=work[sample_id_col].values, name="fold_id")
         return out
 
-    # 格式2：多个 fold 列，尝试 one-hot / 指示列解析
+    # 格式2：多个 fold 列，只自动接受真正的 one-hot / 指示列。
     fold_like_cols = []
     for c in non_id_cols:
         lc = str(c).strip().lower()
@@ -82,6 +128,14 @@ def _extract_fold_map(cvf_df: pd.DataFrame, sample_id_col: str) -> pd.Series:
     fold_block = work[fold_like_cols].apply(pd.to_numeric, errors="coerce")
     if fold_block.isna().all().all():
         raise ValueError("CVFs 多列格式无法解析为数值。")
+
+    is_binary = fold_block.isin([0, 1]).all().all()
+    is_one_hot = is_binary and (fold_block.sum(axis=1) == 1).all()
+    if not is_one_hot:
+        raise ValueError(
+            "CVFs 含多个非 one-hot 列，可能是重复交叉验证划分。"
+            "请在配置 data.fold_column 中明确选择一列，例如 cv_1。"
+        )
 
     # 每行取最大值所在列作为fold
     max_col = fold_block.idxmax(axis=1)
@@ -104,6 +158,7 @@ def load_and_align_data(
     metab_file: str = "Rice_Metabolites_zhuanzhi.csv",
     pheno_file: str = "Rice-Phenotypes.csv",
     cvf_file: str = "CVFs.csv",
+    fold_column: Optional[str] = None,
     traits: Optional[Sequence[str]] = None,
 ) -> AlignedData:
     """
@@ -135,7 +190,7 @@ def load_and_align_data(
         raise ValueError(f"Phenotype 缺少目标性状列: {missing_traits}")
     pheno = pheno[traits]
 
-    fold_map = _extract_fold_map(cvf, id_cvf)
+    fold_map = _extract_fold_map(cvf, id_cvf, fold_column=fold_column)
 
     # 仅保留五个来源共同出现样本
     common_ids = (
@@ -162,6 +217,69 @@ def load_and_align_data(
         metabolites=metab,
         phenotype=pheno,
         fold_map=fold_map,
+    )
+
+
+def load_aligned_from_config(
+    cfg: Mapping[str, Any],
+    traits: Optional[Sequence[str]] = None,
+) -> AlignedData:
+    """Load a dataset using the explicit file mapping stored in a YAML config."""
+
+    data_cfg = cfg.get("data", {})
+    if data_cfg is None:
+        data_cfg = {}
+    if not isinstance(data_cfg, Mapping):
+        raise TypeError("config.data must be a mapping of logical names to CSV files.")
+
+    return load_and_align_data(
+        data_dir=cfg.get("data_dir", "data"),
+        geno_file=str(data_cfg.get("genotype", "Rice_geno_zhuanzhi.csv")),
+        expr_file=str(data_cfg.get("expression", "Rice-Expression_zhaunzhi.csv")),
+        metab_file=str(data_cfg.get("metabolites", "Rice_Metabolites_zhuanzhi.csv")),
+        pheno_file=str(data_cfg.get("phenotype", "Rice-Phenotypes.csv")),
+        cvf_file=str(data_cfg.get("folds", "CVFs.csv")),
+        fold_column=(
+            None
+            if data_cfg.get("fold_column") in (None, "")
+            else str(data_cfg.get("fold_column"))
+        ),
+        traits=traits,
+    )
+
+
+def load_prediction_modalities(
+    data_dir: str | Path,
+    geno_file: str = "Rice_geno_zhuanzhi.csv",
+    expr_file: str = "Rice-Expression_zhaunzhi.csv",
+    metab_file: str = "Rice_Metabolites_zhuanzhi.csv",
+) -> AlignedModalities:
+    """Load and align the three input modalities without requiring phenotype or CV files."""
+
+    data_dir = Path(data_dir)
+    frames: dict[str, pd.DataFrame] = {}
+    for name, filename in (
+        ("genotype", geno_file),
+        ("expression", expr_file),
+        ("metabolites", metab_file),
+    ):
+        frame = _read_csv(data_dir / filename)
+        frames[name] = _prepare_modality_df(frame, _detect_id_column(frame))
+
+    common_ids = (
+        set(frames["genotype"].index.astype(str))
+        & set(frames["expression"].index.astype(str))
+        & set(frames["metabolites"].index.astype(str))
+    )
+    if not common_ids:
+        raise ValueError("The three omics files do not share any sample IDs.")
+
+    sample_ids = sorted(common_ids)
+    return AlignedModalities(
+        sample_ids=sample_ids,
+        genotype=frames["genotype"].loc[sample_ids],
+        expression=frames["expression"].loc[sample_ids],
+        metabolites=frames["metabolites"].loc[sample_ids],
     )
 
 

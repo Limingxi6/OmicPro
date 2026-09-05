@@ -16,8 +16,11 @@ venv/
 data/*
 !data/.gitkeep
 outputs/
+results/
+models/
 logs/
 checkpoints/
+tmp/
 *.pt
 *.pth
 *.ckpt

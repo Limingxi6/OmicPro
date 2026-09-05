@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820">
+  <defs>
+    <linearGradient id="panel" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#F8FAFF"/><stop offset="1" stop-color="#F2EDFF"/></linearGradient>
+    <linearGradient id="blue" x1="0" x2="1"><stop stop-color="#2E7BEA"/><stop offset="1" stop-color="#7356D8"/></linearGradient>
+    <linearGradient id="cyan" x1="0" x2="1"><stop stop-color="#E9F6FF"/><stop offset="1" stop-color="#EEF0FF"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#43507A" flood-opacity=".16"/></filter>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto"><path d="M0,0 L11,5.5 L0,11 Z" fill="#64748B"/></marker>
+    <marker id="arrowPurple" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto"><path d="M0,0 L11,5.5 L0,11 Z" fill="#7656D8"/></marker>
+  </defs>
+  <rect width="1600" height="820" rx="30" fill="url(#panel)"/>
+  <rect x="35" y="28" width="1530" height="764" rx="24" fill="none" stroke="#B9C4E3" stroke-width="2" stroke-dasharray="9 8"/>
+  <text x="75" y="85" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="31" font-weight="700" fill="#293653">Auxiliary Loss (add below “Prediction” in panel A)</text>
+  <text x="75" y="121" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="20" fill="#61708C">Use masked-modality reconstruction during training; remove this branch at inference.</text>
+
+  <!-- prediction / main loss -->
+  <rect x="74" y="170" width="318" height="127" rx="18" fill="#FFFFFF" stroke="#76A7F6" stroke-width="2.5" filter="url(#shadow)"/>
+  <rect x="74" y="170" width="318" height="39" rx="18" fill="url(#blue)"/>
+  <text x="233" y="197" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="white">Prediction (existing)</text>
+  <text x="233" y="243" text-anchor="middle" font-family="Arial, sans-serif" font-size="23" font-weight="700" fill="#263B63">Phenotype ŷ</text>
+  <text x="233" y="274" text-anchor="middle" font-family="Arial, sans-serif" font-size="19" fill="#50627F">Lmain = ℒtask(y, ŷ)</text>
+
+  <!-- source tokens -->
+  <rect x="74" y="427" width="318" height="180" rx="18" fill="#FFFFFF" stroke="#79B5C7" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="233" y="462" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="21" font-weight="700" fill="#26566A">Original modality tokens</text>
+  <g font-family="Arial, sans-serif" font-size="20" font-weight="700" text-anchor="middle">
+    <rect x="101" y="490" width="74" height="72" rx="12" fill="#DDF5FF" stroke="#66B6D4" stroke-width="2"/><text x="138" y="533" fill="#236D8B">G</text>
+    <rect x="196" y="490" width="74" height="72" rx="12" fill="#FDE8EF" stroke="#E68AA4" stroke-width="2"/><text x="233" y="533" fill="#B74566">T</text>
+    <rect x="291" y="490" width="74" height="72" rx="12" fill="#F0E7FF" stroke="#A785E0" stroke-width="2"/><text x="328" y="533" fill="#6743B6">M</text>
+  </g>
+  <text x="233" y="591" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="17" fill="#60718B">full data target (before masking)</text>
+
+  <!-- missing mask -->
+  <rect x="473" y="433" width="225" height="106" rx="18" fill="#FFFDF5" stroke="#E4B650" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="586" y="469" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="#8B681F">Missing mask</text>
+  <text x="586" y="510" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#6F5520">m = [0, 1, 0]</text>
+  <text x="586" y="578" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="17" fill="#6D778B">1 = intentionally masked</text>
+
+  <!-- reconstruction head -->
+  <rect x="794" y="362" width="312" height="186" rx="20" fill="#FFFFFF" stroke="#8E7CDB" stroke-width="2.5" filter="url(#shadow)"/>
+  <rect x="794" y="362" width="312" height="43" rx="20" fill="#6D59D4"/>
+  <text x="950" y="391" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="white">Reconstruction head</text>
+  <text x="950" y="438" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="19" font-weight="700" fill="#433276">Prompt-enhanced token fusion</text>
+  <g font-family="Arial, sans-serif" font-size="20" font-weight="700" text-anchor="middle">
+    <rect x="825" y="463" width="63" height="48" rx="10" fill="#DDF5FF"/><text x="856" y="495" fill="#236D8B">Ĝ</text>
+    <rect x="918" y="463" width="63" height="48" rx="10" fill="#FDE8EF"/><text x="949" y="495" fill="#B74566">T̂</text>
+    <rect x="1012" y="463" width="63" height="48" rx="10" fill="#F0E7FF"/><text x="1043" y="495" fill="#6743B6">M̂</text>
+  </g>
+  <text x="950" y="533" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16" fill="#60718B">predict all modalities; supervise masked ones only</text>
+
+  <!-- loss -->
+  <rect x="1202" y="347" width="294" height="218" rx="20" fill="#FFFFFF" stroke="#EE8B7A" stroke-width="2.5" filter="url(#shadow)"/>
+  <rect x="1202" y="347" width="294" height="44" rx="20" fill="#E96C68"/>
+  <text x="1349" y="377" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="white">Masked auxiliary loss</text>
+  <text x="1349" y="430" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#9C3D3B">Laux = Σᵢ mᵢ · ℒrec(Xᵢ, X̂ᵢ)</text>
+  <line x1="1230" y1="450" x2="1467" y2="450" stroke="#F0CDD0" stroke-width="1.5"/>
+  <text x="1349" y="483" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="18" fill="#57647B">example: m = [0, 1, 0]</text>
+  <text x="1349" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="700" fill="#9C3D3B">Laux = ℒrec(T, T̂)</text>
+  <text x="1349" y="545" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="15" fill="#6D778B">ℒrec: MSE / Smooth L1 / cosine loss</text>
+
+  <!-- total loss -->
+  <rect x="559" y="658" width="484" height="88" rx="22" fill="url(#blue)" filter="url(#shadow)"/>
+  <text x="801" y="695" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="22" font-weight="700" fill="white">Training objective</text>
+  <text x="801" y="726" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="white">Ltotal = Lmain + λaux · Laux</text>
+
+  <!-- arrows -->
+  <path d="M392 233 L425 233 L425 700 L545 700" fill="none" stroke="#2E7BEA" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M392 518 L780 477" fill="none" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M698 486 L780 486" fill="none" stroke="#E0A33B" stroke-width="3" stroke-dasharray="7 6" marker-end="url(#arrow)"/>
+  <path d="M1106 455 L1188 455" fill="none" stroke="#7656D8" stroke-width="3" marker-end="url(#arrowPurple)"/>
+  <path d="M1349 565 C1349 675, 1130 704, 1058 704" fill="none" stroke="#E96C68" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="453" y="384" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16" fill="#65748D">training only</text>
+  <text x="1110" y="621" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="16" fill="#65748D">not used at inference</text>
+</svg>

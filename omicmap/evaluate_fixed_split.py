@@ -8,27 +8,24 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 
-from .data_utils import TRAIT_COLUMNS, get_fixed_fold_split, load_and_align_data
+from .artifacts import ExperimentLayout, save_checkpoint
+from .data_utils import get_fixed_fold_split, load_aligned_from_config
+from .dataset import make_training_loader as make_loader
 from .metrics import regression_metrics_per_trait
-from .model import MultiOmicsMultiTaskRegressor
+from .model_registry import build_model, omicmap_init_kwargs
 from .preprocess import FoldPreprocessor
+from .training import evaluate_model, fit_model
 from .train_cv import (
     YStandardizer,
     _apply_missing,
-    _build_optimizer,
     _build_or_load_missing_codes,
     _filter_complete_samples,
-    _gate_stats_row,
     _resolve_fill_vectors,
     _safe_to_csv,
-    _set_branch_trainable,
     _should_drop_missing_samples,
     choose_device,
-    evaluate_model,
     load_config,
-    make_loader,
     set_seed,
     with_defaults,
 )
@@ -44,51 +41,6 @@ def _parse_csv_list(raw: str, cast_fn) -> list[Any]:
     return vals
 
 
-def _resolve_output_dir(cfg: Dict[str, Any], output_dir_arg: str | None, valid_fold: int, test_fold: int) -> Path:
-    if output_dir_arg:
-        return Path(output_dir_arg)
-    base = Path(str(cfg.get("output_dir", "outputs")))
-    return base / f"fixed_split_v{valid_fold}_t{test_fold}"
-
-
-def _build_model(
-    model_cfg: Dict[str, Any],
-    x_train_g: np.ndarray,
-    x_train_e: np.ndarray,
-    x_train_m: np.ndarray,
-    device: torch.device,
-) -> nn.Module:
-    return MultiOmicsMultiTaskRegressor(
-        num_genotype_features=x_train_g.shape[1],
-        num_expression_features=x_train_e.shape[1],
-        num_metabolites_features=x_train_m.shape[1],
-        num_tasks=1,
-        branch_emb_dim=int(model_cfg["branch_emb_dim"]),
-        fusion_hidden_dims=list(model_cfg["fusion_hidden_dims"]),
-        dropout=float(model_cfg["dropout"]),
-        use_batchnorm=bool(model_cfg["use_batchnorm"]),
-        fusion_num_heads=int(model_cfg["fusion_num_heads"]),
-        fusion_layers=int(model_cfg["fusion_layers"]),
-        prompt_enable=bool(model_cfg["prompt_enable"]),
-        prompt_length=int(model_cfg["prompt_length"]),
-        prompt_depth=int(model_cfg["prompt_depth"]),
-        num_missing_types=int(model_cfg["num_missing_types"]),
-        prompt_gate_init=model_cfg.get("prompt_gate_init", 0.0),
-        prompt_gate_learnable=bool(model_cfg.get("prompt_gate_learnable", True)),
-        prompt_gate_per_modality=bool(model_cfg.get("prompt_gate_per_modality", True)),
-        prompt_gate_use_missing_delta=bool(model_cfg.get("prompt_gate_use_missing_delta", True)),
-        prompt_gate_missing_delta_scale=float(model_cfg.get("prompt_gate_missing_delta_scale", 0.2)),
-        prompt_gate_missing_delta_init_no_missing=model_cfg.get("prompt_gate_missing_delta_init_no_missing", -0.04),
-        prompt_gate_missing_delta_init_missing=model_cfg.get("prompt_gate_missing_delta_init_missing", 0.12),
-        prompt_disable_on_complete=bool(model_cfg.get("prompt_disable_on_complete", True)),
-        prompt_complete_update_scale=float(model_cfg.get("prompt_complete_update_scale", 0.0)),
-        mamba_layers=int(model_cfg.get("mamba_layers", 2)),
-        mamba_d_state=int(model_cfg.get("mamba_d_state", 16)),
-        mamba_d_conv=int(model_cfg.get("mamba_d_conv", 4)),
-        mamba_expand=int(model_cfg.get("mamba_expand", 2)),
-    ).to(device)
-
-
 def _build_pred_df(
     sample_ids: list[str],
     split: str,
@@ -99,6 +51,7 @@ def _build_pred_df(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     trait: str,
+    model_name: str,
 ) -> pd.DataFrame:
     extra_df = pd.DataFrame(
         {
@@ -112,15 +65,16 @@ def _build_pred_df(
         [
             pd.DataFrame(
                 {
-                    "sample_id": sample_ids,
+                    "ID": sample_ids,
                     "split": split,
                     "valid_fold": int(valid_fold),
                     "test_fold": int(test_fold),
+                    "trait": trait,
                 }
             ),
             extra_df,
-            pd.DataFrame(y_true, columns=[f"true_{trait}"]),
-            pd.DataFrame(y_pred, columns=[f"pred_{trait}"]),
+            pd.DataFrame(y_true, columns=["true"]),
+            pd.DataFrame(y_pred, columns=[model_name]),
         ],
         axis=1,
     )
@@ -135,6 +89,7 @@ def run_one_trait_fixed_split(
     test_fold: int,
     device: torch.device,
     output_dir: Path,
+    layout: ExperimentLayout,
 ) -> Dict[str, Any]:
     tr_cfg = cfg["training"]
     model_cfg = cfg["model"]
@@ -246,99 +201,55 @@ def run_one_trait_fixed_split(
         int(tr_cfg["num_workers"]),
     )
 
-    model = _build_model(model_cfg, x_train_g, x_train_e, x_train_m, device)
-    optimizer = _build_optimizer(model, tr_cfg)
-    loss_fn = nn.L1Loss()
-
-    use_aux_losses = bool(tr_cfg.get("use_aux_losses", True))
-    aux_cfg = tr_cfg.get("aux_loss_weights", {})
-    aux_w_g = float(aux_cfg.get("a", 1.0)) if use_aux_losses else 0.0
-    aux_w_e = float(aux_cfg.get("b", 1.0)) if use_aux_losses else 0.0
-    aux_w_m = float(aux_cfg.get("c", 1.0)) if use_aux_losses else 0.0
-
-    best_val = float("inf")
-    best_state: dict[str, torch.Tensor] | None = None
-    wait = 0
-    epochs = int(tr_cfg["epochs"])
-    patience = int(tr_cfg["patience"])
-    min_delta = float(tr_cfg["min_delta"])
-    warmup_epochs = int(tr_cfg.get("prompt_warmup_freeze_branch_epochs", 0))
-    prompt_enabled = bool(model_cfg.get("prompt_enable", False))
-    gate_log_rows: list[dict[str, Any]] = []
-
-    for epoch_idx in range(1, epochs + 1):
-        if prompt_enabled and warmup_epochs > 0:
-            _set_branch_trainable(model, trainable=(epoch_idx > warmup_epochs))
-        else:
-            _set_branch_trainable(model, trainable=True)
-
-        model.train()
-        for geno, expr, metab, present, missing_code, yb in train_loader:
-            optimizer.zero_grad()
-            if use_aux_losses:
-                out_main, out_geno, out_expr, out_metab = model(
-                    geno.to(device),
-                    expr.to(device),
-                    metab.to(device),
-                    missing_code=missing_code.to(device),
-                    return_aux=True,
-                )
-            else:
-                out_main = model(
-                    geno.to(device),
-                    expr.to(device),
-                    metab.to(device),
-                    missing_code=missing_code.to(device),
-                    return_aux=False,
-                )
-
-            target = yb.to(device)
-            main_loss = loss_fn(out_main, target)
-            if use_aux_losses:
-                geno_loss = loss_fn(out_geno, target)
-                expr_loss = loss_fn(out_expr, target)
-                metab_loss = loss_fn(out_metab, target)
-                total_loss = main_loss + aux_w_g * geno_loss + aux_w_e * expr_loss + aux_w_m * metab_loss
-            else:
-                total_loss = main_loss
-
-            total_loss.backward()
-            optimizer.step()
-
-        _, _, val_loss = evaluate_model(model, valid_loader, device, out_dim=1)
-        is_best = val_loss < (best_val - min_delta)
-        gate_log_rows.append(
-            {
-                "trait": trait,
-                "epoch": int(epoch_idx),
-                "valid_fold": int(valid_fold),
-                "test_fold": int(test_fold),
-                "prompt_enabled": int(prompt_enabled),
-                "branch_trainable": int((not prompt_enabled) or (warmup_epochs <= 0) or (epoch_idx > warmup_epochs)),
-                "val_loss": float(val_loss),
-                "is_best": int(is_best),
-            }
-        )
-        gate_log_rows[-1].update(_gate_stats_row(model))
-
-        if is_best:
-            best_val = val_loss
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            wait = 0
-        else:
-            wait += 1
-
-        if wait >= patience:
-            break
+    model_name = str(cfg.get("model_name", "omicmap")).strip().lower()
+    model_init = omicmap_init_kwargs(
+        model_cfg,
+        num_genotype_features=x_train_g.shape[1],
+        num_expression_features=x_train_e.shape[1],
+        num_metabolites_features=x_train_m.shape[1],
+        num_tasks=1,
+    )
+    model = build_model(model_name, model_init, device=device)
+    fit_result = fit_model(
+        model,
+        train_loader,
+        valid_loader,
+        device,
+        tr_cfg,
+        model_cfg,
+        history_context={
+            "trait": trait,
+            "valid_fold": int(valid_fold),
+            "test_fold": int(test_fold),
+        },
+    )
 
     if bool(cfg.get("logging", {}).get("log_prompt_gate", True)):
-        gate_log_dir = output_dir / "prompt_gate_logs"
+        gate_log_dir = output_dir / "logs" / "prompt_gate"
         gate_log_dir.mkdir(parents=True, exist_ok=True)
         gate_log_path = gate_log_dir / f"{trait}_v{valid_fold}_t{test_fold}.csv"
-        _safe_to_csv(pd.DataFrame(gate_log_rows), gate_log_path, index=False)
+        _safe_to_csv(pd.DataFrame(fit_result.history), gate_log_path, index=False)
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    model.load_state_dict(fit_result.best_state_dict)
+    checkpoint_path = save_checkpoint(
+        layout.fixed_checkpoint_path(trait, valid_fold, test_fold, model_name),
+        model=model,
+        model_name=model_name,
+        model_init=model_init,
+        trait=trait,
+        preprocessor=pre,
+        target_mean=y_std.mean,
+        target_std=y_std.std,
+        fill_vectors=(fill_g, fill_e, fill_m),
+        split_ids={"train": train_ids, "valid": valid_ids, "test": test_ids},
+        metadata={
+            "run_name": layout.run_name,
+            "valid_fold": int(valid_fold),
+            "test_fold": int(test_fold),
+            "best_val_loss": float(fit_result.best_val_loss),
+            "epochs_ran": int(fit_result.epochs_ran),
+        },
+    )
 
     pred_valid_std, true_valid_std, valid_loss = evaluate_model(model, valid_loader, device, out_dim=1)
     pred_test_std, true_test_std, test_loss = evaluate_model(model, test_loader, device, out_dim=1)
@@ -378,6 +289,7 @@ def run_one_trait_fixed_split(
         y_true=true_valid,
         y_pred=pred_valid,
         trait=trait,
+        model_name=model_name,
     )
     test_pred_df = _build_pred_df(
         sample_ids=test_ids,
@@ -389,12 +301,15 @@ def run_one_trait_fixed_split(
         y_true=true_test,
         y_pred=pred_test,
         trait=trait,
+        model_name=model_name,
     )
 
     return {
         "metrics_rows": [valid_metrics, test_metrics],
         "predictions_df": pd.concat([valid_pred_df, test_pred_df], axis=0, ignore_index=True),
-        "best_val_loss": float(best_val),
+        "best_val_loss": float(fit_result.best_val_loss),
+        "checkpoint": str(checkpoint_path),
+        "epochs_ran": int(fit_result.epochs_ran),
         "n_train": int(len(train_ids)),
         "n_valid": int(len(valid_ids)),
         "n_test": int(len(test_ids)),
@@ -404,9 +319,9 @@ def run_one_trait_fixed_split(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fixed 8:1:1 evaluation with explicit validation/test folds")
+    parser = argparse.ArgumentParser(description="Train and evaluate OmicMAP on an explicit 8:1:1 fixed split")
     parser.add_argument("--config", type=str, required=True, help="Path to yaml config")
-    parser.add_argument("--trait_name", type=str, default=None, help="Run single trait (yd/tp/gn/kgw).")
+    parser.add_argument("--trait_name", type=str, default=None, help="Run one phenotype column from the selected dataset.")
     parser.add_argument(
         "--traits",
         type=str,
@@ -416,20 +331,29 @@ def main() -> None:
     parser.add_argument("--valid_fold", type=int, default=9, help="Validation fold id. Default: 9")
     parser.add_argument("--test_fold", type=int, default=10, help="Independent test fold id. Default: 10")
     parser.add_argument("--output_dir", type=str, default=None, help="Optional output dir override")
+    parser.add_argument("--run_name", type=str, default=None, help="Override config.run_name")
     args = parser.parse_args()
 
     if int(args.valid_fold) == int(args.test_fold):
         raise ValueError("valid_fold and test_fold must be different.")
 
     cfg = with_defaults(load_config(args.config))
+    if args.run_name is not None:
+        cfg["run_name"] = str(args.run_name).strip()
+    layout = ExperimentLayout.from_config(cfg, args.config)
+    layout.ensure_roots()
+    cfg["run_name"] = layout.run_name
+    cfg["model_name"] = str(cfg.get("model_name", "omicmap")).strip().lower()
+    cfg["model_dir"] = str(layout.model_root.parent)
+    cfg["result_dir"] = str(layout.result_root.parent)
     set_seed(int(cfg["seed"]))
 
-    output_dir = _resolve_output_dir(cfg, args.output_dir, int(args.valid_fold), int(args.test_fold))
+    fixed_tag = f"fixed_v{int(args.valid_fold)}_t{int(args.test_fold)}"
+    output_dir = Path(args.output_dir) if args.output_dir else layout.result_root / fixed_tag
     output_dir.mkdir(parents=True, exist_ok=True)
-    cfg["output_dir"] = str(output_dir)
 
     if bool(cfg.get("missing", {}).get("enable", False)):
-        table_root = Path(str(cfg["missing"].get("table_root", "outputs/missing_tables")))
+        table_root = Path(str(cfg["missing"].get("table_root", "missing_tables")))
         if not table_root.is_absolute():
             table_root = output_dir / table_root
         table_root.mkdir(parents=True, exist_ok=True)
@@ -448,21 +372,16 @@ def main() -> None:
             tt = str(t).strip()
             if tt and tt not in traits:
                 traits.append(tt)
-        invalid = [t for t in traits if t not in TRAIT_COLUMNS]
-        if invalid:
-            raise ValueError(f"Unsupported traits in --traits: {invalid}, expected subset of {TRAIT_COLUMNS}")
         all_traits = traits
         cfg["traits"] = all_traits
 
     trait_name = str(args.trait_name).strip() if args.trait_name is not None else None
     if trait_name is not None:
-        if trait_name not in TRAIT_COLUMNS:
-            raise ValueError(f"Unsupported trait_name={trait_name}, expected one of {TRAIT_COLUMNS}")
         all_traits = [trait_name]
         cfg["traits"] = all_traits
 
     device = choose_device(str(cfg["device"]))
-    aligned = load_and_align_data(data_dir=cfg["data_dir"], traits=all_traits)
+    aligned = load_aligned_from_config(cfg, traits=all_traits)
     split_ids = get_fixed_fold_split(
         aligned.fold_map,
         test_fold=int(args.test_fold),
@@ -473,6 +392,7 @@ def main() -> None:
     best_val_loss_by_trait: Dict[str, float] = {}
     effective_sample_counts_by_trait: Dict[str, Dict[str, int]] = {}
     drop_stats_by_trait: Dict[str, Dict[str, int]] = {}
+    checkpoints_by_trait: Dict[str, str] = {}
     split_pred_dir = output_dir / "split_predictions"
     split_pred_dir.mkdir(parents=True, exist_ok=True)
 
@@ -486,6 +406,7 @@ def main() -> None:
             test_fold=int(args.test_fold),
             device=device,
             output_dir=output_dir,
+            layout=layout,
         )
         metrics_rows.extend(result["metrics_rows"])
         best_val_loss_by_trait[trait] = float(result["best_val_loss"])
@@ -495,6 +416,7 @@ def main() -> None:
             "test": int(result["n_test"]),
         }
         drop_stats_by_trait[trait] = dict(result.get("drop_stats", {}))
+        checkpoints_by_trait[trait] = str(result["checkpoint"])
         pred_path = split_pred_dir / f"{trait}_v{args.valid_fold}_t{args.test_fold}_predictions.csv"
         _safe_to_csv(result["predictions_df"], pred_path, index=False)
 
@@ -524,6 +446,7 @@ def main() -> None:
             "by_trait": drop_stats_by_trait,
         },
         "best_val_loss_by_trait": best_val_loss_by_trait,
+        "checkpoints_by_trait": checkpoints_by_trait,
         "metrics_by_trait": {},
         "metrics_mean_by_split": {},
     }
@@ -556,8 +479,12 @@ def main() -> None:
             "mae": float(sub["mae"].mean()),
         }
 
-    summary_path = output_dir / "summary_fixed_split.json"
+    summary_path = output_dir / "summary" / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    (summary_path.parent / "config_resolved.json").write_text(
+        json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     print(f"[Done] split metrics: {metrics_path}")
     print(f"[Done] split predictions dir: {split_pred_dir}")

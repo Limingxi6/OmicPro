@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "omicmap"
-version = "0.1.0"
+version = "0.2.0"
 description = "Missing-aware prompt-guided multi-omics phenotype prediction."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,11 @@ dependencies = [
   "torch",
   "mamba-ssm",
 ]
+
+[project.scripts]
+omicmap-train = "omicmap.train_cv:main"
+omicmap-train-fixed = "omicmap.train_fixed_split:main"
+omicmap-predict = "omicmap.predict:main"
 
 [tool.setuptools.packages.find]
 include = ["omicmap*"]

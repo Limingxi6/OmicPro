@@ -1,4 +1,4 @@
-from omicmap.train_cv import main
+from omicmap.predict import main
 
 
 if __name__ == "__main__":

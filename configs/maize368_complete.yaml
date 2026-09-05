@@ -1,24 +1,41 @@
 seed: 42
-data_dir: F:/data/prompt/Rice210
-run_name: rice210_complete
+crop: maize
+data_dir: F:/data/prompt/Maize368
+run_name: maize368_complete
 model_name: omicmap
 model_dir: models
 result_dir: results
 device: auto
 
 data:
-  genotype: Rice_geno_zhuanzhi.csv
-  expression: Rice-Expression_zhaunzhi.csv
-  metabolites: Rice_Metabolites_zhuanzhi.csv
-  phenotype: Rice-Phenotypes.csv
+  genotype: 01_zuizhong.csv
+  expression: 02_zuizhong.csv
+  metabolites: 03_zuizhong_guiyi.csv
+  phenotype: phe_20traits_zhong.csv
   folds: CVFs.csv
   fold_column: cv_1
 
 traits:
-  - yd
-  - tp
-  - gn
-  - kgw
+  - Plantheight
+  - Earheight
+  - Earleafwidth
+  - Earleaflength
+  - Tasselmainaxislength
+  - Tasselbranchnumber
+  - Leafnumberaboveear
+  - Earlength
+  - Eardiameter
+  - Cobdiameter
+  - Earrownumber
+  - Kernernumberperrow
+  - 100grainweight
+  - cobweight
+  - kernellength
+  - Kernelwidth
+  - Kernelthickness
+  - Silkingtime
+  - Pollenshed
+  - Headingdate
 
 validation_split: 0.1
 single_trait_mode: true
@@ -65,18 +82,9 @@ model:
 
 missing:
   enable: false
-  ratio:
-    train: 0.0
-    valid: 0.0
-    test: 0.0
-  type:
-    train: none
-    valid: none
-    test: none
-  pattern_probs:
-    geno: 1.0
-    expr: 1.0
-    metab: 1.0
+  ratio: {train: 0.0, valid: 0.0, test: 0.0}
+  type: {train: none, valid: none, test: none}
+  pattern_probs: {geno: 1.0, expr: 1.0, metab: 1.0}
   table_root: missing_tables
   simulate_missing: false
   simulate_pool: [0, 1, 2, 4]
