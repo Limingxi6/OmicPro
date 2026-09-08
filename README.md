@@ -1,185 +1,60 @@
-# OmicMAP
+# OmicPro: Multi-Omics Prediction Based on Prompt Learning with Incomplete Data
 
-OmicMAP is a missing-aware prompt-guided multi-omics phenotype prediction framework. It models genomics, transcriptomics, and metabolomics inputs with modality-specific encoders, keeps a fixed token position for each omics modality, and uses learnable prompts to compensate missing modalities in latent space before cross-modal fusion.
-
-![OmicMAP architecture](docs/figures/omicmap_architecture.svg)
-
-## Key Ideas
-
-- Fixed modality tokens for genomics (G), transcriptomics (T), and metabolomics (M).
-- Zero-filled placeholders for missing modalities instead of deleting missing-token positions.
-- Missing-aware prompts, including staged, common, dynamic, and deeper correlation prompts.
-- Prompt-gated residual updates that strengthen missing-token compensation while limiting perturbation of observed modalities.
-- Summary residual attention for compact cross-modal context fusion.
-- Auxiliary single-modality losses during training to regularize modality encoders.
-
-## Repository Layout
+The repository is arranged around three distinct research workflows so model users do not need to navigate figure-production or application examples.
 
 ```text
 .
-|-- omicmap/                    # Importable package
-|   |-- model.py               # OmicMAP architecture
-|   |-- model_registry.py      # Stable model construction interface
-|   |-- data_utils.py          # Data schema, alignment, and fold parsing
-|   |-- preprocess.py          # Fold-fitted preprocessing
-|   |-- training.py            # Shared training/evaluation engine
-|   |-- artifacts.py           # Checkpoints and experiment layout
-|   |-- train_cv.py            # Cross-validation pipeline
-|   |-- train_fixed_split.py   # Explicit validation/test split pipeline
-|   `-- predict.py             # Checkpoint-based inference
-|-- configs/                    # Named, reproducible experiment configs
-|-- scripts/                    # Thin compatibility wrappers
-|-- docs/                       # Method/data documentation and figures
-|-- data/                       # Optional local data mount; real data are not committed
-|-- tests/                      # Lightweight import checks
-|-- models/                     # Generated checkpoints (not committed)
-|-- results/                    # Generated predictions, metrics, and logs (not committed)
-|-- METHOD.md                   # Manuscript-style method description
-`-- README.md
+|-- 01OmicPro_code/          # installable model package, configs, tests, and data contract
+|-- 02Figure_code/           # manuscript figure source assets and reproduction notes
+|-- 03OmicPro_application/   # checkpoint inference and custom-data recipes
+|-- models/                  # local checkpoints; never committed
+`-- results/                 # local predictions and metrics; never committed
 ```
 
-This follows the same useful separation seen in GEG2P and GEFormer: data contracts,
-model implementation, training orchestration, prediction entry points, and stable
-artifact paths are independent layers.
+## Start here
 
-## Installation
+1. Read the model package guide in [01OmicPro_code](01OmicPro_code/README.md).
+2. Create the environment and install the package from the repository root:
 
-Python 3.10+ is recommended. GPU training requires a PyTorch/CUDA environment compatible with `mamba-ssm`.
+   ```bash
+   conda env create -f 01OmicPro_code/environment.yml
+   conda activate omicpro
+   pip install --no-deps -e 01OmicPro_code
+   ```
 
-Conda users can reproduce the named environment directly:
+3. Run the included synthetic demo immediately, or follow [the data contract](01OmicPro_code/docs/DATA.md) and set the private data root once:
 
-```bash
-conda env create -f environment.yml
-conda activate omicmap
-```
+   ```bash
+   omicpro-check-data --config 01OmicPro_code/configs/demo.yaml
+   omicpro-train --config 01OmicPro_code/configs/demo.yaml --trait_name demo_trait --folds 1
+   ```
 
-Alternatively, create a standard virtual environment:
+   For the supplied research datasets, set the data root:
 
-```bash
-python -m venv .venv
+   ```powershell
+   $env:OMICPRO_DATA_DIR = "D:/your-private-omicpro-data"
+   ```
 
-# Linux/macOS
-source .venv/bin/activate
+4. Validate a configured research dataset, then run a small cross-validation check:
 
-# Windows PowerShell
-# .\.venv\Scripts\Activate.ps1
+   ```bash
+   omicpro-check-data --config 01OmicPro_code/configs/rice210_complete.yaml
+   omicpro-train --config 01OmicPro_code/configs/quick_test.yaml --trait_name yd
+   ```
 
-pip install -r requirements.txt
-```
+The data, trained weights, and generated results are intentionally excluded from Git. See [the application recipes](03OmicPro_application/README.md) for prediction on new samples and [the figure guide](02Figure_code/README.md) for manuscript assets.
 
-## Data
+The core environment is pinned to the tested Linux/CUDA 12.1 server baseline;
+see [environment instructions](01OmicPro_code/docs/ENVIRONMENT.md) before
+running GPU training.
 
-Real data stay outside the repository. Each experiment config declares its data
-directory, logical file mapping, phenotype columns, and CV assignment column.
-The current local configs use `F:/data/prompt`:
+## Repository conventions
 
-| Config | Dataset | Samples | Targets |
-| --- | --- | ---: | ---: |
-| `configs/rice210_complete.yaml` | Rice210 | 210 | 4 |
-| `configs/maize368_complete.yaml` | Maize368 | 333 | 20 |
-| `configs/rapeseed_kf_complete.yaml` | Rapeseed KF | 175 | 13 |
-| `configs/rapeseed_yl_complete.yaml` | Rapeseed YL | 175 | 13 |
-
-The rapeseed CV table contains repeated assignments (`cv_1` through `cv_10`),
-so the selected repetition is explicit in `data.fold_column`. See
-`docs/DATA.md` for the complete data contract. Check redistribution permissions
-before publishing any original data files.
-
-## Quick Check
-
-After adding data files, run a one-epoch smoke test:
-
-```bash
-python -m omicmap.train_cv --config configs/quick_test.yaml --trait_name yd
-```
-
-Outputs are written to `results/quick_test/`, and reusable checkpoints are written
-to `models/quick_test/`.
-
-## Training
-
-Complete-modality training for one target:
-
-```bash
-python -m omicmap.train_cv --config configs/rice210_complete.yaml --trait_name yd
-```
-
-Prompt-enabled missing-modality training for one target:
-
-```bash
-python -m omicmap.train_cv --config configs/rice210_prompt_missing.yaml --trait_name yd
-```
-
-Run only selected folds while debugging:
-
-```bash
-python -m omicmap.train_cv \
-  --config configs/quick_test.yaml \
-  --trait_name yd \
-  --folds 1,2
-```
-
-The phenotype targets are read from `traits` in the selected config; they are no
-longer hard-coded to the four rice traits.
-
-Examples for the other crops:
-
-```bash
-python -m omicmap.train_cv --config configs/maize368_complete.yaml --trait_name Plantheight
-python -m omicmap.train_cv --config configs/rapeseed_kf_complete.yaml --trait_name Fe
-python -m omicmap.train_cv --config configs/rapeseed_yl_complete.yaml --trait_name Fe
-```
-
-## Explicit Fixed-Split Training and Evaluation
-
-```bash
-python -m omicmap.train_fixed_split \
-  --config configs/rice210_prompt_missing.yaml \
-  --trait_name yd \
-  --valid_fold 1 \
-  --test_fold 2
-```
-
-`omicmap.evaluate_fixed_split` remains available as a compatibility alias, but the
-operation trains a model before evaluating it, so `train_fixed_split` is the
-accurate command name.
-
-## Prediction
-
-Every checkpoint contains the model weights, constructor arguments, selected
-feature order, preprocessing statistics, target standardization, missing-value
-fill vectors, and training split IDs. Predict without phenotype or CV files:
-
-```bash
-python -m omicmap.predict \
-  --checkpoint models/rice210_complete/k1/yd/omicmap.pt \
-  --data_dir F:/data/prompt/Rice210 \
-  --output results/rice210_complete/predictions/yd_k1.csv
-```
-
-For per-sample missing modalities, provide a CSV containing `ID` and
-`missing_code` columns with bitmask values from 0 to 7.
-
-## Artifact Layout
-
-```text
-models/<run_name>/
-`-- k<fold>/<trait>/<model>.pt
-
-results/<run_name>/
-|-- k<fold>/<trait>.csv          # ID, model prediction, truth, missingness metadata
-|-- logs/prompt_gate/            # Epoch-level diagnostics
-`-- summary/                     # Metrics, OOF predictions, checkpoints, resolved config
-```
-
-The fold prediction table is deliberately model-column based so it can later be
-consumed by a GEG2P-style ensemble without changing the training code.
-
-## Method
-
-The full method write-up is in `METHOD.md`. Data and code-organization notes are
-provided in `docs/DATA.md` and `docs/CODE_ORGANIZATION.md`.
+- A YAML config is the source of truth for every experiment.
+- `models/<run>/k<fold>/<trait>/` stores reusable checkpoints.
+- `results/<run>/` stores fold predictions, metrics, resolved configuration, and diagnostic logs.
+- Original datasets and checkpoint weights must be released only after their redistribution permissions are confirmed.
 
 ## License
 
-No open-source license has been selected yet. Add the intended license before making the repository public or reusable.
+No open-source license has been selected yet. Add the intended license before a public data, model, or code release.

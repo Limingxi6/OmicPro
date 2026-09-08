@@ -1,0 +1,89 @@
+seed: 42
+data_dir: ${OMICPRO_DATA_DIR}/Rice210
+run_name: rice210_complete
+model_name: omicpro
+model_dir: ../../models
+result_dir: ../../results
+device: auto
+
+data:
+  genotype: Rice_geno_zhuanzhi.csv
+  expression: Rice-Expression_zhaunzhi.csv
+  metabolites: Rice_Metabolites_zhuanzhi.csv
+  phenotype: Rice-Phenotypes.csv
+  folds: CVFs.csv
+  fold_column: cv_1
+
+traits:
+  - yd
+  - tp
+  - gn
+  - kgw
+
+validation_split: 0.1
+single_trait_mode: true
+
+training:
+  epochs: 200
+  batch_size: 32
+  lr: 0.0003
+  weight_decay: 0.0001
+  aux_loss_weights:
+    geno: 0.10
+    expr: 0.10
+    metab: 0.80
+  prompt_lr_mult: 0.8
+  prompt_warmup_freeze_branch_epochs: 1
+  patience: 35
+  min_delta: 0.00001
+  num_workers: 0
+
+model:
+  branch_emb_dim: 128
+  fusion_hidden_dims: [256, 128]
+  dropout: 0.1
+  use_batchnorm: true
+  fusion_num_heads: 4
+  fusion_layers: 6
+  prompt_enable: true
+  prompt_length: 6
+  prompt_depth: 3
+  num_missing_types: 8
+  prompt_gate_init: 0.05
+  prompt_gate_learnable: true
+  prompt_gate_per_modality: true
+  prompt_gate_use_missing_delta: true
+  prompt_gate_missing_delta_scale: 0.21
+  prompt_gate_missing_delta_init_no_missing: 0.005
+  prompt_gate_missing_delta_init_missing: 0.12
+  prompt_disable_on_complete: false
+  prompt_complete_update_scale: 0.42
+  mamba_layers: 2
+  mamba_d_state: 16
+  mamba_d_conv: 4
+  mamba_expand: 2
+
+missing:
+  enable: false
+  ratio:
+    train: 0.0
+    valid: 0.0
+    test: 0.0
+  type:
+    train: none
+    valid: none
+    test: none
+  pattern_probs:
+    geno: 1.0
+    expr: 1.0
+    metab: 1.0
+  table_root: missing_tables
+  simulate_missing: false
+  simulate_pool: [0, 1, 2, 4]
+  fill_strategy: zero
+  fill_value: 0.0
+
+preprocess:
+  topk_genotype: null
+  topk_expression: 3000
+  topk_metabolites: 600

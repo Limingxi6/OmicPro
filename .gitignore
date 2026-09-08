@@ -13,8 +13,10 @@ venv/
 .env.*
 
 # Data and generated artifacts
-data/*
-!data/.gitkeep
+01OmicPro_code/data/*
+!01OmicPro_code/data/.gitkeep
+!01OmicPro_code/data/demo/
+!01OmicPro_code/data/demo/**
 outputs/
 results/
 models/

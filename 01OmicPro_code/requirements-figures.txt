@@ -1,0 +1,4 @@
+# Optional dependencies used only by 02Figure_code utilities.
+# Install after the core environment: pip install -r requirements-figures.txt
+Pillow==12.0.0
+pypdfium2>=4.30,<5

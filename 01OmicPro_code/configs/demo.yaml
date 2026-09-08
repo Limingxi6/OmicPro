@@ -1,0 +1,60 @@
+# Public synthetic smoke-test dataset. It is not biological benchmark data.
+seed: 7
+data_dir: ../data/demo
+run_name: demo
+model_name: omicpro
+model_dir: ../../models
+result_dir: ../../results
+device: auto
+validation_split: 0.25
+
+data:
+  genotype: genotype.csv
+  expression: expression.csv
+  metabolites: metabolites.csv
+  phenotype: phenotype.csv
+  folds: folds.csv
+  fold_column: fold
+
+traits: [demo_trait]
+
+training:
+  epochs: 1
+  batch_size: 2
+  lr: 0.001
+  weight_decay: 0.0
+  aux_loss_weights: {geno: 0.1, expr: 0.1, metab: 0.1}
+  prompt_lr_mult: 1.0
+  prompt_warmup_freeze_branch_epochs: 0
+  patience: 1
+  min_delta: 0.0
+  num_workers: 0
+
+model:
+  branch_emb_dim: 8
+  fusion_hidden_dims: [8]
+  dropout: 0.0
+  use_batchnorm: true
+  fusion_num_heads: 4
+  fusion_layers: 1
+  prompt_enable: true
+  prompt_length: 3
+  prompt_depth: 1
+  num_missing_types: 8
+  prompt_gate_init: 0.0
+  prompt_gate_learnable: true
+  mamba_layers: 1
+  mamba_d_state: 4
+  mamba_d_conv: 2
+  mamba_expand: 1
+
+missing:
+  enable: false
+  table_root: missing_tables
+  fill_strategy: zero
+  fill_value: 0.0
+
+preprocess:
+  topk_genotype: null
+  topk_expression: null
+  topk_metabolites: null

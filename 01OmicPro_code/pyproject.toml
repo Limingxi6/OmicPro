@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omicpro"
+version = "0.2.0"
+description = "Multi-omics prediction based on prompt learning with incomplete data."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "PyYAML",
+  "torch",
+  "mamba-ssm",
+]
+
+[project.scripts]
+omicpro-train = "omicpro.train_cv:main"
+omicpro-train-fixed = "omicpro.train_fixed_split:main"
+omicpro-predict = "omicpro.predict:main"
+omicpro-check-data = "omicpro.check_data:main"
+
+[tool.setuptools.packages.find]
+include = ["omicpro*"]

@@ -1,0 +1,16 @@
+# Server3 baseline: Linux, NVIDIA CUDA 12.1, Python 3.10.
+# PyTorch CUDA wheels are served by the additional official index.
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch==2.5.1+cu121
+mamba-ssm==2.3.1
+causal-conv1d==1.6.1
+einops==0.8.2
+ninja==1.13.0
+packaging==26.0
+
+numpy==2.2.6
+pandas==2.3.3
+PyYAML==6.0.3
+scipy==1.15.3
+scikit-learn==1.7.2
